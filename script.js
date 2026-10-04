@@ -5,9 +5,9 @@ const ES_PAGINA_ADMIN = Boolean(document.getElementById('admin-panel'));
 
 // ==================== API BINGO GANGA ====================
 const BINGO_S&B_SUPABASE_URL = 'https://jfqssrxzxaxlszbddmel.supabase.co';
-const BINGO_S&B_SUPABASE_KEY = 'sb_publishable_XxI_36qHnfbqpL7zeU0jqA_qMe7sgIG';
+const BINGO_S&B_SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmcXNzcnh6eGF4bHN6YmRkbWVsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEwNjk2MzQsImV4cCI6MjEwNjY0NTYzNH0.tyZfHi-lww0XgdQ5Bhj2OjMi2nsjznzl6ZczqOtcyVc';
 
-const ADMIN_AUTH_URL = `${BINGO_GANGA_SUPABASE_URL}/functions/v1/admin-auth`;
+const ADMIN_AUTH_URL = `${BINGO_S&B_SUPABASE_URL}/functions/v1/admin-auth`;
 const VERIFY_SESSION_URL = `${BINGO_S&B_SUPABASE_URL}/functions/v1/verify-session`;
 const UPDATE_SESSION_URL = `${BINGO_S&B_SUPABASE_URL}/functions/v1/update-session`;
 
@@ -310,7 +310,7 @@ async function logoutAdmin() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'apikey': BINGO_GANGA_SUPABASE_KEY
+          'apikey': BINGO_S&B_SUPABASE_KEY
         },
         body: JSON.stringify({
           action: 'logout',
