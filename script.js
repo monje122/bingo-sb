@@ -23,8 +23,8 @@ function escapeHTML(value) {
 
 const EDGE_FUNCTION_HEADERS = {
   'Content-Type': 'application/json',
-  'apikey': BINGO_S&B_SUPABASE_KEY,
-  'Authorization': `Bearer ${BINGO_S&B_SUPABASE_KEY}`
+  'apikey': BINGO_SB_SUPABASE_KEY,
+  'Authorization': `Bearer ${BINGO_SB_SUPABASE_KEY}`
 };
 
 // Configuración del administrador
@@ -437,8 +437,8 @@ const deviceId =
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'apikey': BINGO_S&B_SUPABASE_KEY,
-          'Authorization': `Bearer ${BINGO_S&B_SUPABASE_KEY}`
+          'apikey': BINGO_SB_SUPABASE_KEY,
+          'Authorization': `Bearer ${BINGO_SB_SUPABASE_KEY}`
         },
         body: JSON.stringify({ sessionToken, deviceId })
       }
@@ -695,7 +695,7 @@ async function forzarCerrarSesionRemota() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'apikey': BINGO_S&B_SUPABASE_KEY,
+          'apikey': BINGO_SB_SUPABASE_KEY,
           'Authorization': `Bearer ${accessToken}`
         },
         body: JSON.stringify({ 
