@@ -2497,7 +2497,7 @@ function aplicarReferidorAlFormulario(cedulaReferidor) {
   const vista = document.getElementById('cedula-referidor-vista');
   const ayuda = document.getElementById('ayuda-referido');
 
-  sessionStorage.setItem('bingo_ganga_referidor', referidoLimpio);
+  sessionStorage.setItem('bingo_SB_referidor', referidoLimpio);
   localStorage.setItem('cliente_referido', referidoLimpio);
 
   if (inputReferido) {
@@ -2518,7 +2518,7 @@ function cargarReferidoDesdeEnlace() {
   const params = new URLSearchParams(window.location.search);
   const referidoUrl = normalizarCedulaReferidos(params.get('ref'));
   const referidoGuardado = normalizarCedulaReferidos(
-    sessionStorage.getItem('bingo_ganga_referidor')
+    sessionStorage.getItem('bingo_SB_referidor')
   );
 
   const referido = referidoUrl || referidoGuardado;
