@@ -1,0 +1,2344 @@
+-- Bingo Ganga - esquema seguro y funciones completas para Supabase.
+-- Este archivo es idempotente y representa el estado esperado de producción.
+
+create schema if not exists private;
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
+
+-- Tablas base. Estas definiciones permiten aplicar el archivo completo en un
+-- proyecto Supabase nuevo y también son seguras sobre el proyecto existente.
+create table if not exists public.admins (
+  id bigint generated always as identity primary key,
+  usuario varchar,
+  clave_hash text
+);
+
+create table if not exists public.cartones (
+  numero bigint primary key check (numero > 0),
+  ocupado boolean,
+  cedula text,
+  partida_id bigint,
+  reservado_at timestamptz default now(),
+  reservado_hasta timestamptz default (now() + interval '5 minutes')
+);
+
+create table if not exists public.configuracion (
+  clave text primary key,
+  total_cartones bigint,
+  valore text,
+  valor boolean
+);
+
+create table if not exists public.ganadores (
+  id bigint generated always as identity primary key,
+  telefono text,
+  nombre text,
+  cedula text,
+  cartones text,
+  premio varchar,
+  fecha date,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.inscripciones (
+  id bigint generated always as identity primary key,
+  nombre text,
+  telefono text,
+  cartones text[],
+  cedula text,
+  referido text,
+  estado text not null default 'pendiente',
+  comprobante varchar,
+  partida_id bigint,
+  referencia4dig text,
+  monto_bs numeric(12,2) not null default 0,
+  pago_banco text,
+  pago_telefono text,
+  pago_cedula text,
+  usa_promo boolean not null default false,
+  promo_desc text,
+  precio_unitario_bs numeric(12,2),
+  created_at timestamptz not null default now(),
+  acepta_terminos boolean not null default false,
+  terminos_version text
+);
+
+-- Sesión administrativa de un solo dispositivo. Los tokens se guardan
+-- únicamente como hashes SHA-256 y solo las Edge Functions de servicio
+-- pueden leer o modificar esta tabla.
+create table if not exists public.admin_sessions (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  email text not null,
+  device_id text not null check (
+    length(btrim(device_id)) between 8 and 200
+  ),
+  session_token_hash text not null unique check (
+    session_token_hash ~ '^[0-9a-f]{64}$'
+  ),
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
+create index if not exists admin_sessions_expires_at_idx
+  on public.admin_sessions (expires_at);
+
+alter table public.admin_sessions enable row level security;
+revoke all on table public.admin_sessions from public, anon, authenticated;
+grant all on table public.admin_sessions to service_role;
+
+alter table public.inscripciones
+  add column if not exists referencia4dig text,
+  add column if not exists monto_bs numeric(12,2) not null default 0,
+  add column if not exists pago_banco text,
+  add column if not exists pago_telefono text,
+  add column if not exists pago_cedula text,
+  add column if not exists usa_promo boolean not null default false,
+  add column if not exists promo_desc text,
+  add column if not exists precio_unitario_bs numeric(12,2),
+  add column if not exists acepta_terminos boolean not null default false,
+  add column if not exists terminos_version text,
+  add column if not exists created_at timestamptz not null default now();
+
+alter table public.cartones
+  add column if not exists reservado_at timestamptz default now(),
+  add column if not exists reservado_hasta timestamptz default (now() + interval '5 minutes'),
+  add column if not exists reserva_token_hash text;
+
+alter table public.cartones
+  alter column reservado_hasta set default (now() + interval '5 minutes');
+
+alter table public.ganadores
+  add column if not exists created_at timestamptz not null default now();
+
+create or replace function private.hash_reserva_token(_token text)
+returns text
+language sql
+immutable
+strict
+set search_path = ''
+as $$
+  select encode(extensions.digest(_token, 'sha256'), 'hex');
+$$;
+
+revoke all on function private.hash_reserva_token(text)
+  from public, anon, authenticated;
+
+update public.inscripciones
+set estado = 'pendiente'
+where estado is null or btrim(estado) = '';
+
+alter table public.inscripciones
+  alter column estado set default 'pendiente',
+  alter column estado set not null;
+
+-- Unifica las claves heredadas sin perder el precio configurado por el negocio.
+insert into public.configuracion (clave, valore, valor)
+values
+  ('total_cartones', '300', null),
+  ('precio_carton', '250', null),
+  ('modo_cartones', 'libre', null),
+  ('cartones_obligatorios', '1', null),
+  ('ventas_abierta', null, true),
+  ('tiempo_reserva_minutos', '5', null),
+  ('mostrar_barra_progreso', 'true', null),
+  ('meta_referidos', '5', null),
+  ('terminos_version', '2026-07-19', null),
+  ('link_whatsapp', '', null),
+  ('youtube_live', '', null),
+  ('youtube_url', 'https://www.youtube.com/@bingoandinoenvivo', null),
+  ('facebook_url', 'https://www.facebook.com/profile.php?id=61576936027458', null),
+  ('instagram_url', 'https://www.instagram.com/bingoandino75/', null),
+  ('whatsapp_contacto', 'https://wa.me/584247221608', null),
+  ('pago_banco', 'Banco de Venezuela (0102)', null),
+  ('pago_telefono', '0424-4687496', null),
+  ('pago_cedula', '25476241', null),
+  ('imagen_premios_inicio', '', null)
+on conflict (clave) do nothing;
+
+insert into public.configuracion (clave, valore, valor)
+values
+  ('tiempo_reserva_minutos', '5', null)
+on conflict (clave) do update
+set valore = excluded.valore,
+    valor = excluded.valor;
+
+update public.configuracion destino
+set valore = origen.valore
+from public.configuracion origen
+where destino.clave = 'precio_carton'
+  and origen.clave = 'precio_por_carton'
+  and coalesce(nullif(destino.valore, '')::numeric, 0) = 0
+  and coalesce(nullif(origen.valore, '')::numeric, 0) > 0;
+
+update public.configuracion destino
+set valor = origen.valor
+from public.configuracion origen
+where destino.clave = 'ventas_abierta'
+  and origen.clave = 'ventas_abiertas'
+  and destino.valor is null;
+
+insert into public.configuracion (clave, valore, valor)
+select 'promo' || n || '_activa', 'false', null::boolean from generate_series(1,4) n
+union all
+select 'promo' || n || '_descripcion', '', null::boolean from generate_series(1,4) n
+union all
+select 'promo' || n || '_cantidad', '0', null::boolean from generate_series(1,4) n
+union all
+select 'promo' || n || '_precio', '0', null::boolean from generate_series(1,4) n
+on conflict (clave) do nothing;
+
+-- El acceso administrativo ahora depende exclusivamente de Supabase Auth.
+delete from public.configuracion
+where clave in ('clave_admin', 'clave_reinicio', 'clave_borrar_cartones', 'precio_por_carton', 'ventas_abiertas', '1');
+
+create index if not exists inscripciones_cedula_created_idx
+  on public.inscripciones (cedula, created_at desc);
+create index if not exists inscripciones_estado_created_idx
+  on public.inscripciones (estado, created_at desc);
+create index if not exists inscripciones_referido_aprobado_idx
+  on public.inscripciones (referido, cedula) where estado = 'aprobado';
+create index if not exists inscripciones_cartones_gin_idx
+  on public.inscripciones using gin (cartones);
+create unique index if not exists inscripciones_comprobante_unique_idx
+  on public.inscripciones (comprobante) where comprobante is not null;
+create index if not exists cartones_cedula_idx on public.cartones (cedula);
+create index if not exists cartones_reserva_expirada_idx
+  on public.cartones (reservado_hasta) where reservado_hasta is not null;
+create index if not exists ganadores_fecha_idx
+  on public.ganadores (fecha desc, created_at desc);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'cartones_reserva_token_hash_valido'
+      and conrelid = 'public.cartones'::regclass
+  ) then
+    alter table public.cartones
+      add constraint cartones_reserva_token_hash_valido
+      check (
+        reserva_token_hash is null
+        or reserva_token_hash ~ '^[0-9a-f]{64}$'
+      );
+  end if;
+end;
+$$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'inscripciones_estado_valido'
+      and conrelid = 'public.inscripciones'::regclass
+  ) then
+    alter table public.inscripciones
+      add constraint inscripciones_estado_valido
+      check (estado in ('pendiente','aprobado','rechazado'));
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'inscripciones_monto_no_negativo'
+      and conrelid = 'public.inscripciones'::regclass
+  ) then
+    alter table public.inscripciones
+      add constraint inscripciones_monto_no_negativo check (monto_bs >= 0);
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'cartones_numero_positivo'
+      and conrelid = 'public.cartones'::regclass
+  ) then
+    alter table public.cartones
+      add constraint cartones_numero_positivo check (numero > 0);
+  end if;
+end $$;
+
+create or replace function private.is_admin()
+returns boolean
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  select coalesce((select auth.jwt() -> 'app_metadata' ->> 'role'), '') = 'admin';
+$$;
+
+revoke all on function private.is_admin() from public, anon;
+grant usage on schema private to anon, authenticated;
+grant execute on function private.is_admin() to authenticated;
+
+alter table public.admins enable row level security;
+alter table public.cartones enable row level security;
+alter table public.configuracion enable row level security;
+alter table public.ganadores enable row level security;
+alter table public.inscripciones enable row level security;
+
+drop policy if exists public_read_cartones on public.cartones;
+drop policy if exists public_read_config on public.configuracion;
+drop policy if exists public_read_winners on public.ganadores;
+
+drop policy if exists admin_all_admins on public.admins;
+create policy admin_all_admins on public.admins for all to authenticated
+  using ((select private.is_admin())) with check ((select private.is_admin()));
+drop policy if exists admin_all_cartones on public.cartones;
+create policy admin_all_cartones on public.cartones for all to authenticated
+  using ((select private.is_admin())) with check ((select private.is_admin()));
+drop policy if exists admin_all_configuracion on public.configuracion;
+create policy admin_all_configuracion on public.configuracion for all to authenticated
+  using ((select private.is_admin())) with check ((select private.is_admin()));
+drop policy if exists admin_all_ganadores on public.ganadores;
+create policy admin_all_ganadores on public.ganadores for all to authenticated
+  using ((select private.is_admin())) with check ((select private.is_admin()));
+drop policy if exists admin_all_inscripciones on public.inscripciones;
+create policy admin_all_inscripciones on public.inscripciones for all to authenticated
+  using ((select private.is_admin())) with check ((select private.is_admin()));
+
+revoke all on public.admins, public.cartones, public.configuracion, public.ganadores, public.inscripciones
+  from anon, authenticated;
+grant select, insert, update, delete
+  on public.admins, public.cartones, public.configuracion, public.ganadores, public.inscripciones
+  to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
+
+-- Las funciones públicas devuelven solo columnas expresamente seguras.
+drop function if exists public.rpc_configuracion_publica();
+create function public.rpc_configuracion_publica()
+returns table(clave text, valore text, valor boolean)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select c.clave, c.valore, c.valor
+  from public.configuracion c
+  where c.clave = any(array[
+    'total_cartones','precio_carton','modo_cartones','cartones_obligatorios',
+    'ventas_abierta','tiempo_reserva_minutos','mostrar_barra_progreso',
+    'meta_referidos','terminos_version','link_whatsapp','youtube_live',
+    'youtube_url','facebook_url','instagram_url','whatsapp_contacto',
+    'pago_banco','pago_telefono','pago_cedula','imagen_premios_inicio'
+  ]) or c.clave ~ '^promo[1-4]_(activa|descripcion|cantidad|precio)$'
+  order by c.clave;
+$$;
+
+drop function if exists public.rpc_cartones_ocupados();
+create function public.rpc_cartones_ocupados()
+returns table(numero bigint)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  delete from public.cartones c
+  where c.reservado_hasta is not null
+    and c.reservado_hasta < now()
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado')
+        and c.numero::text = any(i.cartones)
+    );
+
+  return query select c.numero from public.cartones c order by c.numero;
+end;
+$$;
+
+drop function if exists public.rpc_ganadores_publicos();
+create function public.rpc_ganadores_publicos()
+returns table(nombre text, cartones text, premio text, fecha date)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select g.nombre, g.cartones, g.premio::text, g.fecha
+  from public.ganadores g
+  order by g.fecha desc nulls last, g.created_at desc
+  limit 100;
+$$;
+
+drop function if exists public.rpc_top_compradores();
+create function public.rpc_top_compradores()
+returns table(nombre text, cedula_mascara text, total_cartones bigint)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select min(i.nombre), '****' || right(i.cedula, 4), sum(cardinality(i.cartones))::bigint
+  from public.inscripciones i
+  where i.estado = 'aprobado'
+  group by i.cedula
+  order by sum(cardinality(i.cartones)) desc, min(i.nombre)
+  limit 5;
+$$;
+
+drop function if exists public.rpc_resumen_referidos(text);
+create function public.rpc_resumen_referidos(_cedula text)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select jsonb_build_object(
+    'aprobados', count(distinct i.cedula),
+    'meta', coalesce((select nullif(c.valore,'')::integer from public.configuracion c where c.clave='meta_referidos'), 5)
+  )
+  from public.inscripciones i
+  where i.estado = 'aprobado'
+    and i.referido = regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g');
+$$;
+
+drop function if exists public.rpc_reservar_carton(bigint,text);
+drop function if exists public.rpc_reservar_carton(bigint,text,text);
+create function public.rpc_reservar_carton(
+  _numero bigint,
+  _cedula text,
+  _reserva_token text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_total integer;
+  v_minutos integer;
+  v_expira timestamptz;
+  v_cedula text := regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g');
+  v_token_hash text;
+  v_ventas boolean;
+begin
+  if length(v_cedula) < 5 or length(v_cedula) > 14
+     or coalesce(_reserva_token,'') !~ '^[0-9a-f]{64}$' then
+    return jsonb_build_object('exito',false,'mensaje','Datos de reserva inválidos');
+  end if;
+
+  v_token_hash := private.hash_reserva_token(_reserva_token);
+
+  select coalesce(c.valor, lower(c.valore) in ('true','1','si','sí'))
+  into v_ventas from public.configuracion c where c.clave='ventas_abierta';
+  if v_ventas is not true then
+    return jsonb_build_object('exito',false,'mensaje','Las ventas están cerradas');
+  end if;
+
+  select coalesce(nullif(c.valore,'')::integer, 300)
+  into v_total from public.configuracion c where c.clave='total_cartones';
+  select least(30, greatest(5, coalesce(nullif(c.valore,'')::integer, 5)))
+  into v_minutos from public.configuracion c where c.clave='tiempo_reserva_minutos';
+
+  if _numero < 1 or _numero > coalesce(v_total,300) then
+    return jsonb_build_object('exito',false,'mensaje','Cartón fuera de rango');
+  end if;
+
+  delete from public.cartones c
+  where c.numero = _numero
+    and c.reservado_hasta is not null
+    and c.reservado_hasta < now()
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado') and _numero::text = any(i.cartones)
+    );
+
+  insert into public.cartones(
+    numero,ocupado,cedula,reservado_at,reservado_hasta,reserva_token_hash
+  )
+  values (
+    _numero,true,v_cedula,now(),
+    now() + make_interval(mins => coalesce(v_minutos,5)),v_token_hash
+  )
+  on conflict (numero) do update
+    set reservado_hasta = excluded.reservado_hasta,
+        reservado_at = now()
+    where public.cartones.cedula = v_cedula
+      and public.cartones.reservado_hasta is not null
+      and public.cartones.reserva_token_hash = v_token_hash
+  returning reservado_hasta into v_expira;
+
+  if v_expira is not null then
+    return jsonb_build_object('exito',true,'numero',_numero,'expira',v_expira);
+  end if;
+
+  return jsonb_build_object('exito',false,'mensaje','Ese cartón ya está ocupado');
+end;
+$$;
+
+drop function if exists public.rpc_reservar_cartones_aleatorios(integer,text,bigint);
+drop function if exists public.rpc_reservar_cartones_aleatorios(integer,text,text,bigint);
+create function public.rpc_reservar_cartones_aleatorios(
+  _cantidad integer,
+  _cedula text,
+  _reserva_token text,
+  _partida_id bigint default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_total integer;
+  v_minutos integer;
+  v_num bigint;
+  v_insertado bigint;
+  v_resultado bigint[] := array[]::bigint[];
+  v_cedula text := regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g');
+  v_token_hash text;
+  v_ventas boolean;
+begin
+  if length(v_cedula) < 5 or _cantidad < 1 or _cantidad > 100
+     or coalesce(_reserva_token,'') !~ '^[0-9a-f]{64}$' then
+    return jsonb_build_object('exito',false,'mensaje','Solicitud inválida');
+  end if;
+
+  v_token_hash := private.hash_reserva_token(_reserva_token);
+
+  select coalesce(c.valor, lower(c.valore) in ('true','1','si','sí'))
+  into v_ventas from public.configuracion c where c.clave='ventas_abierta';
+  if v_ventas is not true then
+    return jsonb_build_object('exito',false,'mensaje','Las ventas están cerradas');
+  end if;
+
+  select coalesce(nullif(c.valore,'')::integer,300) into v_total
+  from public.configuracion c where c.clave='total_cartones';
+  select least(30,greatest(5,coalesce(nullif(c.valore,'')::integer,5))) into v_minutos
+  from public.configuracion c where c.clave='tiempo_reserva_minutos';
+
+  delete from public.cartones c
+  where c.reservado_hasta is not null and c.reservado_hasta < now()
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado') and c.numero::text = any(i.cartones)
+    );
+
+  for v_num in
+    select s.n
+    from generate_series(1,coalesce(v_total,300)) as s(n)
+    where not exists (select 1 from public.cartones c where c.numero=s.n)
+    order by random()
+  loop
+    v_insertado := null;
+    insert into public.cartones(
+      numero,ocupado,cedula,partida_id,reservado_at,reservado_hasta,reserva_token_hash
+    )
+    values(
+      v_num,true,v_cedula,_partida_id,now(),
+      now()+make_interval(mins=>coalesce(v_minutos,5)),v_token_hash
+    )
+    on conflict(numero) do nothing
+    returning numero into v_insertado;
+
+    if v_insertado is not null then
+      v_resultado := array_append(v_resultado,v_insertado);
+      exit when cardinality(v_resultado) = _cantidad;
+    end if;
+  end loop;
+
+  if cardinality(v_resultado) <> _cantidad then
+    delete from public.cartones c
+    where c.numero = any(v_resultado) and c.cedula=v_cedula
+      and c.reservado_hasta is not null
+      and c.reserva_token_hash=v_token_hash;
+    return jsonb_build_object('exito',false,'mensaje','No quedan suficientes cartones disponibles');
+  end if;
+
+  return jsonb_build_object(
+    'exito',true,
+    'cartones',(select jsonb_agg(x order by x) from unnest(v_resultado) x),
+    'expira',now()+make_interval(mins=>coalesce(v_minutos,5))
+  );
+end;
+$$;
+
+drop function if exists public.rpc_liberar_reserva(bigint,text);
+drop function if exists public.rpc_liberar_reserva(bigint,text,text);
+create function public.rpc_liberar_reserva(
+  _numero bigint,
+  _cedula text,
+  _reserva_token text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  delete from public.cartones c
+  where c.numero=_numero
+    and c.cedula=regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g')
+    and c.reserva_token_hash=private.hash_reserva_token(_reserva_token)
+    and c.reservado_hasta is not null
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado') and _numero::text=any(i.cartones)
+    );
+  return found;
+end;
+$$;
+
+drop function if exists public.rpc_liberar_todas_reservas(text);
+drop function if exists public.rpc_liberar_todas_reservas(text,text);
+create function public.rpc_liberar_todas_reservas(
+  _cedula text,
+  _reserva_token text
+)
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_count integer;
+begin
+  delete from public.cartones c
+  where c.cedula=regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g')
+    and c.reserva_token_hash=private.hash_reserva_token(_reserva_token)
+    and c.reservado_hasta is not null
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado') and c.numero::text=any(i.cartones)
+    );
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+drop function if exists public.rpc_renovar_reservas(text,bigint[]);
+drop function if exists public.rpc_renovar_reservas(text,bigint[],text);
+create function public.rpc_renovar_reservas(
+  _cedula text,
+  _cartones bigint[],
+  _reserva_token text
+)
+returns timestamptz
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_expira timestamptz; v_minutos integer;
+begin
+  if cardinality(_cartones) < 1 or cardinality(_cartones) > 100 then return null; end if;
+  select least(30,greatest(5,coalesce(nullif(c.valore,'')::integer,5))) into v_minutos
+  from public.configuracion c where c.clave='tiempo_reserva_minutos';
+  v_expira := now()+make_interval(mins=>coalesce(v_minutos,5));
+  update public.cartones c
+  set reservado_hasta=v_expira
+  where c.numero=any(_cartones)
+    and c.cedula=regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g')
+    and c.reserva_token_hash=private.hash_reserva_token(_reserva_token)
+    and c.reservado_hasta is not null
+    and c.reservado_hasta > now()-interval '30 seconds';
+  if found then return v_expira; end if;
+  return null;
+end;
+$$;
+
+drop function if exists public.rpc_crear_inscripcion(text,text,text,text,bigint[],text,text,numeric,text,text,text);
+drop function if exists public.rpc_crear_inscripcion(text,text,text,text,bigint[],text,text,numeric,text,text,text,integer,boolean);
+drop function if exists public.rpc_crear_inscripcion(text,text,text,text,bigint[],text,text,numeric,text,text,text,integer,boolean,text);
+create function public.rpc_crear_inscripcion(
+  _nombre text,
+  _telefono text,
+  _cedula text,
+  _referido text,
+  _cartones bigint[],
+  _referencia4dig text,
+  _comprobante text,
+  _monto_bs numeric,
+  _pago_banco text default null,
+  _pago_telefono text default null,
+  _pago_cedula text default null,
+  _promo_id integer default null,
+  _acepta_terminos boolean default false,
+  _reserva_token text default null
+)
+returns bigint
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_id bigint;
+  v_total integer;
+  v_reservadas integer;
+  v_unicas integer;
+  v_precio numeric(12,2);
+  v_monto numeric(12,2);
+  v_promo_activa boolean := false;
+  v_promo_cantidad integer := 0;
+  v_promo_precio numeric(12,2) := 0;
+  v_promo_desc text;
+  v_terminos text;
+  v_ventas boolean;
+  v_cedula text := regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g');
+  v_referido text := regexp_replace(coalesce(_referido,''), '[^0-9]', '', 'g');
+  v_token_hash text;
+begin
+  if _acepta_terminos is not true then raise exception 'Debes aceptar los términos y la política de privacidad'; end if;
+  if length(btrim(coalesce(_nombre,''))) < 3 or length(btrim(_nombre)) > 90 then raise exception 'Nombre inválido'; end if;
+  if length(regexp_replace(coalesce(_telefono,''), '[^0-9]', '', 'g')) < 7 then raise exception 'Teléfono inválido'; end if;
+  if length(v_cedula) < 5 or length(v_cedula) > 14 then raise exception 'Cédula inválida'; end if;
+  if v_referido = v_cedula then raise exception 'No puedes referirte a ti mismo'; end if;
+  if cardinality(_cartones) < 1 or cardinality(_cartones) > 100 then raise exception 'Cantidad de cartones inválida'; end if;
+  if coalesce(_referencia4dig,'') !~ '^[0-9]{4}$' then raise exception 'Referencia inválida'; end if;
+  if coalesce(_comprobante,'') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9a-fA-F-]{36}\.(jpg|jpeg|png|webp)$' then raise exception 'Comprobante inválido'; end if;
+  if coalesce(_reserva_token,'') !~ '^[0-9a-f]{64}$' then raise exception 'Token de reserva inválido'; end if;
+
+  v_token_hash := private.hash_reserva_token(_reserva_token);
+
+  select count(distinct x) into v_unicas from unnest(_cartones) x;
+  if v_unicas <> cardinality(_cartones) then raise exception 'Hay cartones repetidos'; end if;
+
+  select coalesce(c.valor, lower(c.valore) in ('true','1','si','sí')) into v_ventas
+  from public.configuracion c where c.clave='ventas_abierta';
+  if v_ventas is not true then raise exception 'Las ventas están cerradas'; end if;
+
+  select coalesce(nullif(c.valore,'')::integer,300) into v_total
+  from public.configuracion c where c.clave='total_cartones';
+  if exists(select 1 from unnest(_cartones) x where x < 1 or x > coalesce(v_total,300)) then
+    raise exception 'Hay cartones fuera de rango';
+  end if;
+
+  perform 1 from public.cartones c where c.numero=any(_cartones) order by c.numero for update;
+  select count(*) into v_reservadas
+  from public.cartones c
+  where c.numero=any(_cartones)
+    and c.cedula=v_cedula
+    and c.reservado_hasta is not null
+    and c.reservado_hasta >= now()
+    and c.reserva_token_hash=v_token_hash;
+  if v_reservadas <> cardinality(_cartones) then
+    raise exception 'Una reserva expiró o pertenece a otra persona';
+  end if;
+
+  if exists(
+    select 1 from public.inscripciones i
+    where i.estado in ('pendiente','aprobado')
+      and i.cartones && array(select x::text from unnest(_cartones) x)
+  ) then raise exception 'Hay cartones ya inscritos'; end if;
+
+  if not exists(
+    select 1 from storage.objects o
+    where o.bucket_id='comprobantes' and o.name=_comprobante
+  ) then raise exception 'No se encontró el comprobante subido'; end if;
+
+  select greatest(0,coalesce(nullif(c.valore,'')::numeric,0)) into v_precio
+  from public.configuracion c where c.clave='precio_carton';
+  v_precio := coalesce(v_precio,0);
+  v_monto := cardinality(_cartones) * v_precio;
+
+  if _promo_id between 1 and 4 then
+    select lower(coalesce(a.valore,'false')) in ('true','1','si','sí'),
+           coalesce(nullif(q.valore,'')::integer,0),
+           greatest(0,coalesce(nullif(p.valore,'')::numeric,0)),
+           nullif(btrim(d.valore),'')
+    into v_promo_activa,v_promo_cantidad,v_promo_precio,v_promo_desc
+    from public.configuracion a
+    join public.configuracion q on q.clave='promo'||_promo_id||'_cantidad'
+    join public.configuracion p on p.clave='promo'||_promo_id||'_precio'
+    join public.configuracion d on d.clave='promo'||_promo_id||'_descripcion'
+    where a.clave='promo'||_promo_id||'_activa';
+
+    if v_promo_activa and v_promo_cantidad=cardinality(_cartones) then
+      v_monto := v_promo_precio;
+    else
+      v_promo_activa := false;
+      v_promo_desc := null;
+    end if;
+  end if;
+
+  select coalesce(nullif(c.valore,''),'2026-07-19') into v_terminos
+  from public.configuracion c where c.clave='terminos_version';
+
+  insert into public.inscripciones(
+    nombre,telefono,cedula,referido,cartones,referencia4dig,comprobante,estado,
+    monto_bs,pago_banco,pago_telefono,pago_cedula,usa_promo,promo_desc,
+    precio_unitario_bs,acepta_terminos,terminos_version
+  ) values (
+    btrim(_nombre),btrim(_telefono),v_cedula,nullif(v_referido,''),
+    array(select x::text from unnest(_cartones) x order by x),
+    _referencia4dig,_comprobante,'pendiente',v_monto,
+    nullif(left(btrim(coalesce(_pago_banco,'')),80),''),
+    nullif(left(btrim(coalesce(_pago_telefono,'')),30),''),
+    nullif(left(btrim(coalesce(_pago_cedula,'')),20),''),
+    v_promo_activa,v_promo_desc,v_precio,true,v_terminos
+  ) returning id into v_id;
+
+  update public.cartones c
+  set reservado_hasta=null,
+      reserva_token_hash=null
+  where c.numero=any(_cartones) and c.cedula=v_cedula;
+
+  return v_id;
+end;
+$$;
+
+drop function if exists public.rpc_consultar_jugadas(text);
+create function public.rpc_consultar_jugadas(_cedula text)
+returns table(estado text, cartones text[], monto_bs numeric, created_at timestamptz)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select i.estado, i.cartones, i.monto_bs, i.created_at
+  from public.inscripciones i
+  where i.cedula=regexp_replace(coalesce(_cedula,''), '[^0-9]', '', 'g')
+  order by i.created_at desc
+  limit 20;
+$$;
+
+drop function if exists public.rpc_lista_aprobados();
+create function public.rpc_lista_aprobados()
+returns table(carton bigint, nombre text, cedula_mascara text)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select c::bigint, i.nombre, repeat('*',greatest(length(i.cedula)-4,0))||right(i.cedula,4)
+  from public.inscripciones i
+  cross join lateral unnest(i.cartones) c
+  where i.estado='aprobado' and c ~ '^[0-9]+$'
+  order by c::bigint;
+$$;
+
+drop function if exists public.rpc_listar_cartones_huerfanos(interval);
+create function public.rpc_listar_cartones_huerfanos(_min_age interval default interval '5 minutes')
+returns table(numero bigint, cedula text, reservado_at timestamptz, reservado_hasta timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  return query
+  select c.numero,c.cedula,c.reservado_at,c.reservado_hasta
+  from public.cartones c
+  where c.reservado_at < now()-greatest(_min_age,interval '5 minutes')
+    and (c.reservado_hasta is null or c.reservado_hasta < now())
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado') and c.numero::text=any(i.cartones)
+    )
+  order by c.reservado_at;
+end;
+$$;
+
+drop function if exists public.rpc_liberar_cartones_huerfanos(interval);
+create function public.rpc_liberar_cartones_huerfanos(_min_age interval default interval '5 minutes')
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_count integer;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  delete from public.cartones c
+  where c.reservado_at < now()-greatest(_min_age,interval '5 minutes')
+    and (c.reservado_hasta is null or c.reservado_hasta < now())
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente','aprobado') and c.numero::text=any(i.cartones)
+    );
+  get diagnostics v_count=row_count;
+  return v_count;
+end;
+$$;
+
+drop function if exists public.rpc_admin_cambiar_estado(bigint,text);
+create function public.rpc_admin_cambiar_estado(_id bigint, _estado text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v public.inscripciones%rowtype; v_num bigint; v_conflictos integer;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  if _estado not in ('pendiente','aprobado','rechazado') then raise exception 'Estado inválido'; end if;
+  select * into v from public.inscripciones i where i.id=_id for update;
+  if not found then raise exception 'Inscripción no encontrada'; end if;
+
+  if _estado='rechazado' then
+    delete from public.cartones c
+    where c.cedula=v.cedula
+      and c.numero::text=any(v.cartones)
+      and c.reservado_hasta is null
+      and not exists (
+        select 1
+        from public.inscripciones i
+        where i.id<>_id
+          and i.estado in ('pendiente','aprobado')
+          and c.numero::text=any(i.cartones)
+      );
+  else
+    select
+      (select count(*)
+       from public.cartones c
+       where c.numero::text=any(v.cartones)
+         and (c.cedula<>v.cedula or c.reservado_hasta is not null))
+      +
+      (select count(*)
+       from public.inscripciones i
+       where i.id<>_id
+         and i.estado in ('pendiente','aprobado')
+         and i.cartones && v.cartones)
+    into v_conflictos;
+    if v_conflictos>0 then raise exception 'Uno o más cartones ya pertenecen a otra persona'; end if;
+
+    for v_num in select x::bigint from unnest(v.cartones) x where x ~ '^[0-9]+$'
+    loop
+      insert into public.cartones(numero,ocupado,cedula,reservado_at,reservado_hasta)
+      values(v_num,true,v.cedula,now(),null)
+      on conflict(numero) do update
+        set ocupado=true,cedula=excluded.cedula,reservado_hasta=null
+        where public.cartones.cedula=excluded.cedula;
+    end loop;
+  end if;
+
+  update public.inscripciones set estado=_estado where id=_id;
+  return jsonb_build_object('exito',true,'estado',_estado);
+end;
+$$;
+
+drop function if exists public.rpc_eliminar_inscripcion_seguro(bigint);
+create function public.rpc_eliminar_inscripcion_seguro(_id bigint)
+returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v public.inscripciones%rowtype;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  select * into v from public.inscripciones i where i.id=_id for update;
+  if not found then raise exception 'Inscripción no encontrada'; end if;
+  delete from public.cartones c
+  where c.cedula=v.cedula
+    and c.numero::text=any(v.cartones)
+    and c.reservado_hasta is null
+    and not exists (
+      select 1
+      from public.inscripciones i
+      where i.id<>_id
+        and i.estado in ('pendiente','aprobado')
+        and c.numero::text=any(i.cartones)
+    );
+  delete from public.inscripciones where id=_id;
+  return v.comprobante::text;
+end;
+$$;
+
+drop function if exists public.rpc_admin_reiniciar_ventas(boolean);
+create function public.rpc_admin_reiniciar_ventas(_incluir_ganadores boolean default false)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_ins integer; v_cart integer; v_gan integer:=0;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  delete from public.inscripciones; get diagnostics v_ins=row_count;
+  delete from public.cartones; get diagnostics v_cart=row_count;
+  if _incluir_ganadores then delete from public.ganadores; get diagnostics v_gan=row_count; end if;
+  return jsonb_build_object('inscripciones',v_ins,'cartones',v_cart,'ganadores',v_gan);
+end;
+$$;
+
+drop function if exists public.rpc_admin_lanzar_cohetes();
+create function public.rpc_admin_lanzar_cohetes()
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  perform realtime.send(
+    jsonb_build_object('lanzado_en', now()),
+    'cohetes',
+    'bingo-ganga-celebraciones',
+    false
+  );
+  return true;
+end;
+$$;
+
+comment on function public.rpc_admin_lanzar_cohetes() is
+  'Envía por Realtime la animación de cohetes a los clientes públicos conectados.';
+
+-- Cierra el EXECUTE implícito que PostgreSQL concede a PUBLIC.
+revoke all on function public.rpc_configuracion_publica() from public, anon, authenticated;
+revoke all on function public.rpc_cartones_ocupados() from public, anon, authenticated;
+revoke all on function public.rpc_ganadores_publicos() from public, anon, authenticated;
+revoke all on function public.rpc_top_compradores() from public, anon, authenticated;
+revoke all on function public.rpc_resumen_referidos(text) from public, anon, authenticated;
+revoke all on function public.rpc_reservar_carton(bigint,text,text) from public, anon, authenticated;
+revoke all on function public.rpc_reservar_cartones_aleatorios(integer,text,text,bigint) from public, anon, authenticated;
+revoke all on function public.rpc_liberar_reserva(bigint,text,text) from public, anon, authenticated;
+revoke all on function public.rpc_liberar_todas_reservas(text,text) from public, anon, authenticated;
+revoke all on function public.rpc_renovar_reservas(text,bigint[],text) from public, anon, authenticated;
+revoke all on function public.rpc_crear_inscripcion(text,text,text,text,bigint[],text,text,numeric,text,text,text,integer,boolean,text) from public, anon, authenticated;
+revoke all on function public.rpc_consultar_jugadas(text) from public, anon, authenticated;
+revoke all on function public.rpc_lista_aprobados() from public, anon, authenticated;
+revoke all on function public.rpc_listar_cartones_huerfanos(interval) from public, anon, authenticated;
+revoke all on function public.rpc_liberar_cartones_huerfanos(interval) from public, anon, authenticated;
+revoke all on function public.rpc_admin_cambiar_estado(bigint,text) from public, anon, authenticated;
+revoke all on function public.rpc_eliminar_inscripcion_seguro(bigint) from public, anon, authenticated;
+revoke all on function public.rpc_admin_reiniciar_ventas(boolean) from public, anon, authenticated;
+revoke all on function public.rpc_admin_lanzar_cohetes() from public, anon, authenticated;
+
+grant execute on function
+  public.rpc_configuracion_publica(),
+  public.rpc_cartones_ocupados(),
+  public.rpc_ganadores_publicos(),
+  public.rpc_top_compradores(),
+  public.rpc_resumen_referidos(text),
+  public.rpc_reservar_carton(bigint,text,text),
+  public.rpc_reservar_cartones_aleatorios(integer,text,text,bigint),
+  public.rpc_liberar_reserva(bigint,text,text),
+  public.rpc_liberar_todas_reservas(text,text),
+  public.rpc_renovar_reservas(text,bigint[],text),
+  public.rpc_crear_inscripcion(text,text,text,text,bigint[],text,text,numeric,text,text,text,integer,boolean,text),
+  public.rpc_consultar_jugadas(text),
+  public.rpc_lista_aprobados()
+to anon, authenticated;
+
+grant execute on function
+  public.rpc_listar_cartones_huerfanos(interval),
+  public.rpc_liberar_cartones_huerfanos(interval),
+  public.rpc_admin_cambiar_estado(bigint,text),
+  public.rpc_eliminar_inscripcion_seguro(bigint),
+  public.rpc_admin_reiniciar_ventas(boolean),
+  public.rpc_admin_lanzar_cohetes()
+to authenticated;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'inscripciones'
+  ) then
+    alter publication supabase_realtime add table public.inscripciones;
+  end if;
+end;
+$$;
+
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+values
+ ('comprobantes','comprobantes',false,5242880,array['image/jpeg','image/png','image/webp']),
+ ('cartones','cartones',true,5242880,array['image/jpeg','image/png','image/webp']),
+ ('imagenes','imagenes',true,5242880,array['image/jpeg','image/png','image/webp'])
+on conflict(id) do update
+set public=excluded.public,
+    file_size_limit=excluded.file_size_limit,
+    allowed_mime_types=excluded.allowed_mime_types;
+
+drop policy if exists public_upload_receipts on storage.objects;
+create policy public_upload_receipts on storage.objects for insert to anon
+with check(
+  bucket_id='comprobantes'
+  and lower(storage.extension(name)) in ('jpg','jpeg','png','webp')
+  and (storage.foldername(name))[1] ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  and storage.filename(name) ~* '^[0-9a-f-]{36}\.(jpg|jpeg|png|webp)$'
+  and length(name) < 180
+);
+
+-- Permite al mismo cliente limpiar un comprobante recién subido cuando la
+-- inscripción falla. El nombre UUID no se puede listar ni descargar y la
+-- eliminación deja de estar permitida en cuanto el archivo se usa o envejece.
+create or replace function private.can_delete_recent_receipt(
+  _name text,
+  _created_at timestamptz
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select _created_at >= now() - interval '15 minutes'
+    and not exists (
+      select 1
+      from public.inscripciones i
+      where i.comprobante = _name
+    );
+$$;
+
+revoke all on function private.can_delete_recent_receipt(text,timestamptz)
+  from public, anon, authenticated;
+grant execute on function private.can_delete_recent_receipt(text,timestamptz)
+  to anon;
+
+drop policy if exists public_delete_unclaimed_receipts on storage.objects;
+create policy public_delete_unclaimed_receipts on storage.objects
+for delete to anon
+using (
+  bucket_id='comprobantes'
+  and lower(storage.extension(name)) in ('jpg','jpeg','png','webp')
+  and (storage.foldername(name))[1] ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  and storage.filename(name) ~* '^[0-9a-f-]{36}\.(jpg|jpeg|png|webp)$'
+  and private.can_delete_recent_receipt(name,created_at)
+);
+
+drop policy if exists public_read_assets on storage.objects;
+create policy public_read_assets on storage.objects for select to anon
+using(bucket_id in ('cartones','imagenes'));
+
+drop policy if exists admin_manage_storage on storage.objects;
+create policy admin_manage_storage on storage.objects for all to authenticated
+using((select private.is_admin())) with check((select private.is_admin()));
+
+grant select,insert,delete on storage.objects to anon;
+grant select,insert,update,delete on storage.objects to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ═══════════════════════════════════════════════════════════════════
+-- CARTÓN GRATIS POR REFERIDOS
+-- Esta sección coincide con la migración versionada de 2026-07-20.
+-- ═══════════════════════════════════════════════════════════════════
+
+-- Premio de cartón gratis por referidos.
+-- La captura es evidencia para el administrador; la elegibilidad siempre se
+-- valida de nuevo en PostgreSQL antes de crear y antes de aprobar la solicitud.
+
+create table if not exists public.solicitudes_carton_gratis (
+  id bigint generated always as identity primary key,
+  cedula text not null check (cedula ~ '^[0-9]{5,14}$'),
+  nombre text not null check (length(btrim(nombre)) between 3 and 90),
+  telefono text not null check (
+    length(regexp_replace(telefono, '[^0-9]', '', 'g')) between 7 and 15
+  ),
+  carton bigint not null check (carton > 0),
+  captura varchar(180) not null unique check (
+    captura ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9a-fA-F-]{36}\.(jpg|jpeg|png|webp)$'
+  ),
+  estado text not null default 'pendiente' check (
+    estado in ('pendiente', 'aprobado', 'rechazado')
+  ),
+  meta_referidos integer not null check (meta_referidos between 1 and 100),
+  referidos_validados integer not null check (referidos_validados >= meta_referidos),
+  pago_banco text,
+  pago_telefono text,
+  pago_cedula text,
+  created_at timestamptz not null default now(),
+  revisado_at timestamptz,
+  revisado_por uuid references auth.users(id) on delete set null,
+  constraint solicitudes_carton_gratis_revision_coherente check (
+    (estado = 'pendiente' and revisado_at is null and revisado_por is null)
+    or (estado in ('aprobado', 'rechazado') and revisado_at is not null)
+  )
+);
+
+create unique index if not exists solicitudes_carton_gratis_pendiente_cedula_idx
+  on public.solicitudes_carton_gratis (cedula)
+  where estado = 'pendiente';
+
+create unique index if not exists solicitudes_carton_gratis_carton_activo_idx
+  on public.solicitudes_carton_gratis (carton)
+  where estado in ('pendiente', 'aprobado');
+
+create index if not exists solicitudes_carton_gratis_estado_fecha_idx
+  on public.solicitudes_carton_gratis (estado, created_at desc);
+
+create index if not exists solicitudes_carton_gratis_cedula_historial_idx
+  on public.solicitudes_carton_gratis (cedula, id desc);
+
+create index if not exists solicitudes_carton_gratis_revisado_por_idx
+  on public.solicitudes_carton_gratis (revisado_por)
+  where revisado_por is not null;
+
+create table if not exists public.referidos_canjeados (
+  solicitud_id bigint not null
+    references public.solicitudes_carton_gratis(id) on delete cascade,
+  referidor_cedula text not null check (referidor_cedula ~ '^[0-9]{5,14}$'),
+  referido_cedula text not null check (referido_cedula ~ '^[0-9]{5,14}$'),
+  consumido_at timestamptz not null default now(),
+  primary key (solicitud_id, referido_cedula),
+  unique (referido_cedula),
+  unique (referidor_cedula, referido_cedula)
+);
+
+create index if not exists referidos_canjeados_referidor_idx
+  on public.referidos_canjeados (referidor_cedula, consumido_at desc);
+
+alter table public.cartones
+  add column if not exists premio_solicitud_id bigint;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'cartones_premio_solicitud_fk'
+      and conrelid = 'public.cartones'::regclass
+  ) then
+    alter table public.cartones
+      add constraint cartones_premio_solicitud_fk
+      foreign key (premio_solicitud_id)
+      references public.solicitudes_carton_gratis(id)
+      on delete set null;
+  end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'cartones_premio_reserva_coherente'
+      and conrelid = 'public.cartones'::regclass
+  ) then
+    alter table public.cartones
+      add constraint cartones_premio_reserva_coherente check (
+        premio_solicitud_id is null
+        or (reservado_hasta is null and reserva_token_hash is null)
+      );
+  end if;
+end;
+$$;
+
+create index if not exists cartones_premio_solicitud_idx
+  on public.cartones (premio_solicitud_id)
+  where premio_solicitud_id is not null;
+
+create index if not exists inscripciones_referido_canonico_idx
+  on public.inscripciones (cedula, created_at, id)
+  include (referido)
+  where estado = 'aprobado' and referido is not null;
+
+create table if not exists private.cedulas_aprobadas_historial (
+  cedula text primary key check (cedula ~ '^[0-9]{5,14}$'),
+  primera_inscripcion_id bigint not null check (primera_inscripcion_id > 0),
+  primer_referidor_cedula text check (
+    primer_referidor_cedula is null
+    or (
+      primer_referidor_cedula ~ '^[0-9]{5,14}$'
+      and primer_referidor_cedula <> cedula
+    )
+  ),
+  primera_aprobacion_at timestamptz not null,
+  registrado_at timestamptz not null default now()
+);
+
+comment on table private.cedulas_aprobadas_historial is
+  'Registro interno permanente para impedir que una cedula aprobada vuelva a generar credito como referido.';
+comment on column private.cedulas_aprobadas_historial.primera_inscripcion_id is
+  'Identificador historico sin FK: la inscripcion original se elimina al reiniciar las ventas.';
+
+create index if not exists cedulas_aprobadas_historial_referidor_idx
+  on private.cedulas_aprobadas_historial (
+    primer_referidor_cedula,
+    primera_aprobacion_at,
+    cedula
+  )
+  where primer_referidor_cedula is not null;
+
+alter table private.cedulas_aprobadas_historial enable row level security;
+revoke all on table private.cedulas_aprobadas_historial
+  from public, anon, authenticated, service_role;
+
+with normalizadas as (
+  select
+    i.id,
+    regexp_replace(coalesce(i.cedula, ''), '[^0-9]', '', 'g') as cedula,
+    regexp_replace(coalesce(i.referido, ''), '[^0-9]', '', 'g') as referidor,
+    i.created_at,
+    row_number() over (
+      partition by regexp_replace(coalesce(i.cedula, ''), '[^0-9]', '', 'g')
+      order by i.created_at, i.id
+    ) as orden
+  from public.inscripciones i
+  where i.estado = 'aprobado'
+    and regexp_replace(coalesce(i.cedula, ''), '[^0-9]', '', 'g')
+      ~ '^[0-9]{5,14}$'
+)
+insert into private.cedulas_aprobadas_historial (
+  cedula,
+  primera_inscripcion_id,
+  primer_referidor_cedula,
+  primera_aprobacion_at
+)
+select
+  n.cedula,
+  n.id,
+  case
+    when n.referidor ~ '^[0-9]{5,14}$' and n.referidor <> n.cedula
+      then n.referidor
+    else null
+  end,
+  n.created_at
+from normalizadas n
+where n.orden = 1
+on conflict (cedula) do nothing;
+
+create or replace function private.registrar_primera_cedula_aprobada()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_cedula text := regexp_replace(coalesce(new.cedula, ''), '[^0-9]', '', 'g');
+  v_referidor text := regexp_replace(coalesce(new.referido, ''), '[^0-9]', '', 'g');
+begin
+  if tg_op = 'UPDATE' and old.estado = 'aprobado' then
+    return new;
+  end if;
+
+  if new.estado <> 'aprobado' or v_cedula !~ '^[0-9]{5,14}$' then
+    return new;
+  end if;
+
+  if v_referidor !~ '^[0-9]{5,14}$' or v_referidor = v_cedula then
+    v_referidor := null;
+  end if;
+
+  insert into private.cedulas_aprobadas_historial (
+    cedula,
+    primera_inscripcion_id,
+    primer_referidor_cedula,
+    primera_aprobacion_at
+  ) values (
+    v_cedula,
+    new.id,
+    v_referidor,
+    now()
+  )
+  on conflict (cedula) do nothing;
+
+  return new;
+end;
+$$;
+
+revoke all on function private.registrar_primera_cedula_aprobada()
+  from public, anon, authenticated, service_role;
+
+drop trigger if exists registrar_primera_cedula_aprobada
+  on public.inscripciones;
+create trigger registrar_primera_cedula_aprobada
+after insert or update of estado on public.inscripciones
+for each row
+when (new.estado = 'aprobado')
+execute function private.registrar_primera_cedula_aprobada();
+
+alter table public.solicitudes_carton_gratis enable row level security;
+alter table public.referidos_canjeados enable row level security;
+
+drop policy if exists admin_read_solicitudes_carton_gratis
+  on public.solicitudes_carton_gratis;
+create policy admin_read_solicitudes_carton_gratis
+  on public.solicitudes_carton_gratis
+  for select to authenticated
+  using ((select private.is_admin()));
+
+revoke all on table public.solicitudes_carton_gratis,
+  public.referidos_canjeados from public, anon, authenticated;
+grant select on table public.solicitudes_carton_gratis to authenticated;
+grant all on table public.solicitudes_carton_gratis,
+  public.referidos_canjeados to service_role;
+
+create or replace function private.referidos_aprobados_canonicos(_cedula text)
+returns table(referido_cedula text, aprobado_at timestamptz)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select h.cedula, h.primera_aprobacion_at
+  from private.cedulas_aprobadas_historial h
+  join public.inscripciones i
+    on i.id = h.primera_inscripcion_id
+   and regexp_replace(coalesce(i.cedula, ''), '[^0-9]', '', 'g') = h.cedula
+  where i.estado = 'aprobado'
+    and h.primer_referidor_cedula =
+      regexp_replace(coalesce(_cedula, ''), '[^0-9]', '', 'g')
+  order by h.primera_aprobacion_at, h.cedula;
+$$;
+
+revoke all on function private.referidos_aprobados_canonicos(text)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.rpc_resumen_referidos(_cedula text)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_cedula text := regexp_replace(coalesce(_cedula, ''), '[^0-9]', '', 'g');
+  v_meta integer := 5;
+  v_total integer := 0;
+  v_consumidos integer := 0;
+  v_disponibles integer := 0;
+  v_tiene_compra boolean := false;
+  v_pendiente boolean := false;
+  v_ultima jsonb;
+begin
+  select least(100, greatest(1, coalesce(nullif(c.valore, '')::integer, 5)))
+  into v_meta
+  from public.configuracion c
+  where c.clave = 'meta_referidos';
+  v_meta := coalesce(v_meta, 5);
+
+  if v_cedula !~ '^[0-9]{5,14}$' then
+    return jsonb_build_object(
+      'aprobados', 0,
+      'total_aprobados', 0,
+      'consumidos', 0,
+      'meta', v_meta,
+      'puede_reclamar', false,
+      'tiene_compra_aprobada', false,
+      'solicitud_pendiente', false,
+      'ultima_solicitud', null
+    );
+  end if;
+
+  select count(*)::integer
+  into v_total
+  from private.referidos_aprobados_canonicos(v_cedula);
+
+  select count(*)::integer
+  into v_consumidos
+  from public.referidos_canjeados r
+  where r.referidor_cedula = v_cedula;
+
+  select count(*)::integer
+  into v_disponibles
+  from private.referidos_aprobados_canonicos(v_cedula) a
+  where not exists (
+    select 1
+    from public.referidos_canjeados r
+    where r.referidor_cedula = v_cedula
+      and r.referido_cedula = a.referido_cedula
+  );
+
+  select exists (
+    select 1
+    from public.inscripciones i
+    where i.cedula = v_cedula and i.estado = 'aprobado'
+  ) into v_tiene_compra;
+
+  select exists (
+    select 1
+    from public.solicitudes_carton_gratis s
+    where s.cedula = v_cedula and s.estado = 'pendiente'
+  ) into v_pendiente;
+
+  select jsonb_build_object(
+    'estado', s.estado,
+    'carton', s.carton,
+    'created_at', s.created_at,
+    'revisado_at', s.revisado_at
+  )
+  into v_ultima
+  from public.solicitudes_carton_gratis s
+  where s.cedula = v_cedula
+  order by s.id desc
+  limit 1;
+
+  return jsonb_build_object(
+    'aprobados', v_disponibles,
+    'total_aprobados', v_total,
+    'consumidos', v_consumidos,
+    'meta', v_meta,
+    'puede_reclamar',
+      v_disponibles >= v_meta and v_tiene_compra and not v_pendiente,
+    'tiene_compra_aprobada', v_tiene_compra,
+    'solicitud_pendiente', v_pendiente,
+    'ultima_solicitud', v_ultima
+  );
+end;
+$$;
+
+create or replace function public.rpc_solicitar_carton_gratis(
+  _cedula text,
+  _telefono text,
+  _carton bigint,
+  _captura text,
+  _reserva_token text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_id bigint;
+  v_cedula text := regexp_replace(coalesce(_cedula, ''), '[^0-9]', '', 'g');
+  v_telefono text := regexp_replace(coalesce(_telefono, ''), '[^0-9]', '', 'g');
+  v_meta integer := 5;
+  v_disponibles integer := 0;
+  v_total integer := 300;
+  v_ventas boolean := false;
+  v_cliente public.inscripciones%rowtype;
+  v_reserva public.cartones%rowtype;
+begin
+  if v_cedula !~ '^[0-9]{5,14}$' then
+    raise exception 'Cédula inválida';
+  end if;
+  if length(v_telefono) < 7 or length(v_telefono) > 15 then
+    raise exception 'Teléfono inválido';
+  end if;
+  if coalesce(_reserva_token, '') !~ '^[0-9a-f]{64}$' then
+    raise exception 'Token de reserva inválido';
+  end if;
+  if coalesce(_captura, '') !~
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9a-fA-F-]{36}\.(jpg|jpeg|png|webp)$' then
+    raise exception 'Captura inválida';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('premio-referidos:' || v_cedula, 0)
+  );
+
+  select coalesce(c.valor, lower(c.valore) in ('true', '1', 'si', 'sí'))
+  into v_ventas
+  from public.configuracion c
+  where c.clave = 'ventas_abierta';
+  if v_ventas is not true then
+    raise exception 'Las ventas están cerradas';
+  end if;
+
+  select least(100, greatest(1, coalesce(nullif(c.valore, '')::integer, 5)))
+  into v_meta
+  from public.configuracion c
+  where c.clave = 'meta_referidos';
+  v_meta := coalesce(v_meta, 5);
+
+  select coalesce(nullif(c.valore, '')::integer, 300)
+  into v_total
+  from public.configuracion c
+  where c.clave = 'total_cartones';
+  v_total := coalesce(v_total, 300);
+
+  if _carton < 1 or _carton > v_total then
+    raise exception 'Cartón fuera de rango';
+  end if;
+
+  if exists (
+    select 1
+    from public.solicitudes_carton_gratis s
+    where s.cedula = v_cedula and s.estado = 'pendiente'
+  ) then
+    raise exception 'Ya tienes un cartón gratis pendiente de revisión';
+  end if;
+
+  select count(*)::integer
+  into v_disponibles
+  from private.referidos_aprobados_canonicos(v_cedula) a
+  where not exists (
+    select 1
+    from public.referidos_canjeados r
+    where r.referidor_cedula = v_cedula
+      and r.referido_cedula = a.referido_cedula
+  );
+
+  if v_disponibles < v_meta then
+    raise exception 'Aún no tienes los % referidos aprobados disponibles', v_meta;
+  end if;
+
+  select i.*
+  into v_cliente
+  from public.inscripciones i
+  where i.cedula = v_cedula
+    and i.estado = 'aprobado'
+    and regexp_replace(coalesce(i.telefono, ''), '[^0-9]', '', 'g') = v_telefono
+  order by i.created_at desc, i.id desc
+  limit 1;
+
+  if not found then
+    raise exception 'El teléfono no coincide con una compra aprobada de esta cédula';
+  end if;
+
+  if not exists (
+    select 1
+    from storage.objects o
+    where o.bucket_id = 'comprobantes' and o.name = _captura
+  ) then
+    raise exception 'No se encontró la captura subida';
+  end if;
+
+  if exists (
+    select 1 from public.inscripciones i where i.comprobante = _captura
+    union all
+    select 1 from public.solicitudes_carton_gratis s where s.captura = _captura
+  ) then
+    raise exception 'La captura ya fue utilizada';
+  end if;
+
+  select c.*
+  into v_reserva
+  from public.cartones c
+  where c.numero = _carton
+  for update;
+
+  if not found
+     or v_reserva.cedula <> v_cedula
+     or v_reserva.reservado_hasta is null
+     or v_reserva.reservado_hasta < now()
+     or v_reserva.reserva_token_hash is distinct from
+        private.hash_reserva_token(_reserva_token)
+     or v_reserva.premio_solicitud_id is not null then
+    raise exception 'La reserva del cartón venció o pertenece a otra persona';
+  end if;
+
+  insert into public.solicitudes_carton_gratis (
+    cedula, nombre, telefono, carton, captura, estado,
+    meta_referidos, referidos_validados,
+    pago_banco, pago_telefono, pago_cedula
+  ) values (
+    v_cedula, btrim(v_cliente.nombre), btrim(v_cliente.telefono),
+    _carton, _captura, 'pendiente', v_meta, v_disponibles,
+    v_cliente.pago_banco, v_cliente.pago_telefono, v_cliente.pago_cedula
+  )
+  returning id into v_id;
+
+  update public.cartones c
+  set ocupado = true,
+      cedula = v_cedula,
+      partida_id = null,
+      reservado_at = now(),
+      reservado_hasta = null,
+      reserva_token_hash = null,
+      premio_solicitud_id = v_id
+  where c.numero = _carton;
+
+  return jsonb_build_object(
+    'exito', true,
+    'solicitud_id', v_id,
+    'carton', _carton,
+    'estado', 'pendiente'
+  );
+end;
+$$;
+
+create or replace function public.rpc_admin_listar_cartones_gratis()
+returns table(
+  id bigint,
+  nombre text,
+  telefono text,
+  cedula text,
+  carton bigint,
+  captura text,
+  estado text,
+  meta_referidos integer,
+  referidos_al_solicitar integer,
+  referidos_disponibles integer,
+  created_at timestamptz,
+  revisado_at timestamptz
+)
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  if not (select private.is_admin()) then
+    raise exception 'Acceso denegado';
+  end if;
+
+  return query
+  select
+    s.id,
+    s.nombre,
+    s.telefono,
+    s.cedula,
+    s.carton,
+    s.captura::text,
+    s.estado,
+    s.meta_referidos,
+    s.referidos_validados,
+    (
+      select count(*)::integer
+      from private.referidos_aprobados_canonicos(s.cedula) a
+      where not exists (
+        select 1
+        from public.referidos_canjeados r
+        where r.referidor_cedula = s.cedula
+          and r.referido_cedula = a.referido_cedula
+      )
+    ),
+    s.created_at,
+    s.revisado_at
+  from public.solicitudes_carton_gratis s
+  order by
+    case s.estado when 'pendiente' then 0 when 'rechazado' then 1 else 2 end,
+    s.created_at desc;
+end;
+$$;
+
+create or replace function public.rpc_admin_resolver_carton_gratis(
+  _id bigint,
+  _estado text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v public.solicitudes_carton_gratis%rowtype;
+  v_carton public.cartones%rowtype;
+  v_insertados integer := 0;
+  v_restantes integer := 0;
+begin
+  if not (select private.is_admin()) then
+    raise exception 'Acceso denegado';
+  end if;
+  if _estado not in ('aprobado', 'rechazado') then
+    raise exception 'Estado inválido';
+  end if;
+
+  select s.* into v
+  from public.solicitudes_carton_gratis s
+  where s.id = _id
+  for update;
+  if not found then
+    raise exception 'Solicitud no encontrada';
+  end if;
+
+  if v.estado = _estado then
+    return jsonb_build_object(
+      'exito', true,
+      'sin_cambios', true,
+      'estado', v.estado,
+      'carton', v.carton
+    );
+  end if;
+  if v.estado <> 'pendiente' then
+    raise exception 'La solicitud ya fue revisada';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('premio-referidos:' || v.cedula, 0)
+  );
+
+  select c.* into v_carton
+  from public.cartones c
+  where c.numero = v.carton
+  for update;
+
+  if not found
+     or v_carton.cedula <> v.cedula
+     or v_carton.premio_solicitud_id is distinct from v.id then
+    raise exception 'El cartón reservado para esta solicitud ya no está disponible';
+  end if;
+
+  if _estado = 'rechazado' then
+    update public.solicitudes_carton_gratis
+    set estado = 'rechazado',
+        revisado_at = now(),
+        revisado_por = (select auth.uid())
+    where id = v.id;
+
+    delete from public.cartones c
+    where c.numero = v.carton
+      and c.cedula = v.cedula
+      and c.premio_solicitud_id = v.id;
+
+    return jsonb_build_object(
+      'exito', true,
+      'estado', 'rechazado',
+      'carton', v.carton
+    );
+  end if;
+
+  with elegibles as (
+    select a.referido_cedula
+    from private.referidos_aprobados_canonicos(v.cedula) a
+    where not exists (
+      select 1
+      from public.referidos_canjeados r
+      where r.referidor_cedula = v.cedula
+        and r.referido_cedula = a.referido_cedula
+    )
+    order by a.aprobado_at, a.referido_cedula
+    limit v.meta_referidos
+  ), insertados as (
+    insert into public.referidos_canjeados (
+      solicitud_id, referidor_cedula, referido_cedula
+    )
+    select v.id, v.cedula, e.referido_cedula
+    from elegibles e
+    on conflict do nothing
+    returning 1
+  )
+  select count(*)::integer into v_insertados from insertados;
+
+  if v_insertados <> v.meta_referidos then
+    raise exception 'La solicitud ya no tiene % referidos aprobados disponibles',
+      v.meta_referidos;
+  end if;
+
+  update public.solicitudes_carton_gratis
+  set estado = 'aprobado',
+      revisado_at = now(),
+      revisado_por = (select auth.uid())
+  where id = v.id;
+
+  update public.cartones c
+  set ocupado = true,
+      reservado_hasta = null,
+      reserva_token_hash = null
+  where c.numero = v.carton
+    and c.premio_solicitud_id = v.id;
+
+  select count(*)::integer
+  into v_restantes
+  from private.referidos_aprobados_canonicos(v.cedula) a
+  where not exists (
+    select 1
+    from public.referidos_canjeados r
+    where r.referidor_cedula = v.cedula
+      and r.referido_cedula = a.referido_cedula
+  );
+
+  return jsonb_build_object(
+    'exito', true,
+    'estado', 'aprobado',
+    'carton', v.carton,
+    'referidos_restantes', v_restantes
+  );
+end;
+$$;
+
+create or replace function public.rpc_consultar_jugadas(_cedula text)
+returns table(estado text, cartones text[], monto_bs numeric, created_at timestamptz)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select q.estado, q.cartones, q.monto_bs, q.created_at
+  from (
+    select i.estado, i.cartones, i.monto_bs, i.created_at
+    from public.inscripciones i
+    where i.cedula = regexp_replace(coalesce(_cedula, ''), '[^0-9]', '', 'g')
+
+    union all
+
+    select
+      s.estado,
+      array[s.carton::text],
+      0::numeric,
+      coalesce(s.revisado_at, s.created_at)
+    from public.solicitudes_carton_gratis s
+    where s.cedula = regexp_replace(coalesce(_cedula, ''), '[^0-9]', '', 'g')
+      and s.estado = 'aprobado'
+  ) q
+  order by q.created_at desc
+  limit 20;
+$$;
+
+create or replace function public.rpc_lista_aprobados()
+returns table(carton bigint, nombre text, cedula_mascara text)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select q.carton, q.nombre, q.cedula_mascara
+  from (
+    select
+      c::bigint as carton,
+      i.nombre,
+      repeat('*', greatest(length(i.cedula) - 4, 0)) || right(i.cedula, 4)
+        as cedula_mascara
+    from public.inscripciones i
+    cross join lateral unnest(i.cartones) c
+    where i.estado = 'aprobado' and c ~ '^[0-9]+$'
+
+    union all
+
+    select
+      s.carton,
+      s.nombre,
+      repeat('*', greatest(length(s.cedula) - 4, 0)) || right(s.cedula, 4)
+    from public.solicitudes_carton_gratis s
+    where s.estado = 'aprobado'
+  ) q
+  order by q.carton;
+$$;
+
+create or replace function public.rpc_listar_cartones_huerfanos(
+  _min_age interval default interval '5 minutes'
+)
+returns table(numero bigint, cedula text, reservado_at timestamptz, reservado_hasta timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  return query
+  select c.numero, c.cedula, c.reservado_at, c.reservado_hasta
+  from public.cartones c
+  where c.reservado_at < now() - greatest(_min_age, interval '5 minutes')
+    and (c.reservado_hasta is null or c.reservado_hasta < now())
+    and c.premio_solicitud_id is null
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente', 'aprobado')
+        and c.numero::text = any(i.cartones)
+    )
+  order by c.reservado_at;
+end;
+$$;
+
+create or replace function public.rpc_liberar_cartones_huerfanos(
+  _min_age interval default interval '5 minutes'
+)
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_count integer;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  delete from public.cartones c
+  where c.reservado_at < now() - greatest(_min_age, interval '5 minutes')
+    and (c.reservado_hasta is null or c.reservado_hasta < now())
+    and c.premio_solicitud_id is null
+    and not exists (
+      select 1 from public.inscripciones i
+      where i.estado in ('pendiente', 'aprobado')
+        and c.numero::text = any(i.cartones)
+    );
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+create or replace function public.rpc_admin_cambiar_estado(
+  _id bigint,
+  _estado text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v public.inscripciones%rowtype;
+  v_num bigint;
+  v_conflictos integer;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  if _estado not in ('pendiente', 'aprobado', 'rechazado') then
+    raise exception 'Estado inválido';
+  end if;
+
+  select * into v
+  from public.inscripciones i
+  where i.id = _id
+  for update;
+  if not found then raise exception 'Inscripción no encontrada'; end if;
+
+  if _estado = 'rechazado' then
+    delete from public.cartones c
+    where c.cedula = v.cedula
+      and c.numero::text = any(v.cartones)
+      and c.reservado_hasta is null
+      and c.premio_solicitud_id is null
+      and not exists (
+        select 1
+        from public.inscripciones i
+        where i.id <> _id
+          and i.estado in ('pendiente', 'aprobado')
+          and c.numero::text = any(i.cartones)
+      );
+  else
+    select
+      (
+        select count(*)
+        from public.cartones c
+        where c.numero::text = any(v.cartones)
+          and (
+            c.cedula <> v.cedula
+            or c.reservado_hasta is not null
+            or c.premio_solicitud_id is not null
+          )
+      )
+      +
+      (
+        select count(*)
+        from public.inscripciones i
+        where i.id <> _id
+          and i.estado in ('pendiente', 'aprobado')
+          and i.cartones && v.cartones
+      )
+    into v_conflictos;
+
+    if v_conflictos > 0 then
+      raise exception 'Uno o más cartones ya pertenecen a otra persona o a un premio';
+    end if;
+
+    for v_num in
+      select x::bigint from unnest(v.cartones) x where x ~ '^[0-9]+$'
+    loop
+      insert into public.cartones (
+        numero, ocupado, cedula, reservado_at, reservado_hasta
+      ) values (
+        v_num, true, v.cedula, now(), null
+      )
+      on conflict (numero) do update
+        set ocupado = true,
+            cedula = excluded.cedula,
+            reservado_hasta = null
+        where public.cartones.cedula = excluded.cedula
+          and public.cartones.premio_solicitud_id is null;
+    end loop;
+  end if;
+
+  update public.inscripciones set estado = _estado where id = _id;
+  return jsonb_build_object('exito', true, 'estado', _estado);
+end;
+$$;
+
+create or replace function public.rpc_eliminar_inscripcion_seguro(_id bigint)
+returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v public.inscripciones%rowtype;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  select * into v
+  from public.inscripciones i
+  where i.id = _id
+  for update;
+  if not found then raise exception 'Inscripción no encontrada'; end if;
+
+  delete from public.cartones c
+  where c.cedula = v.cedula
+    and c.numero::text = any(v.cartones)
+    and c.reservado_hasta is null
+    and c.premio_solicitud_id is null
+    and not exists (
+      select 1
+      from public.inscripciones i
+      where i.id <> _id
+        and i.estado in ('pendiente', 'aprobado')
+        and c.numero::text = any(i.cartones)
+    );
+
+  delete from public.inscripciones where id = _id;
+  return v.comprobante::text;
+end;
+$$;
+
+create or replace function public.rpc_admin_reiniciar_ventas(
+  _incluir_ganadores boolean default false
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_ins integer;
+  v_cart integer;
+  v_gan integer := 0;
+  v_premios integer;
+begin
+  if not (select private.is_admin()) then raise exception 'Acceso denegado'; end if;
+  delete from public.solicitudes_carton_gratis where true;
+  get diagnostics v_premios = row_count;
+  delete from public.inscripciones where true;
+  get diagnostics v_ins = row_count;
+  delete from public.cartones where true;
+  get diagnostics v_cart = row_count;
+  if _incluir_ganadores then
+    delete from public.ganadores where true;
+    get diagnostics v_gan = row_count;
+  end if;
+  return jsonb_build_object(
+    'inscripciones', v_ins,
+    'cartones', v_cart,
+    'ganadores', v_gan,
+    'premios_referidos', v_premios
+  );
+end;
+$$;
+
+create or replace function private.can_delete_recent_receipt(
+  _name text,
+  _created_at timestamptz
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select _created_at >= now() - interval '15 minutes'
+    and not exists (
+      select 1 from public.inscripciones i where i.comprobante = _name
+    )
+    and not exists (
+      select 1 from public.solicitudes_carton_gratis s where s.captura = _name
+    );
+$$;
+
+revoke all on function public.rpc_resumen_referidos(text)
+  from public, anon, authenticated;
+revoke all on function public.rpc_solicitar_carton_gratis(text,text,bigint,text,text)
+  from public, anon, authenticated;
+revoke all on function public.rpc_admin_listar_cartones_gratis()
+  from public, anon, authenticated;
+revoke all on function public.rpc_admin_resolver_carton_gratis(bigint,text)
+  from public, anon, authenticated;
+
+grant execute on function public.rpc_resumen_referidos(text),
+  public.rpc_solicitar_carton_gratis(text,text,bigint,text,text)
+to anon, authenticated;
+
+grant execute on function public.rpc_admin_listar_cartones_gratis(),
+  public.rpc_admin_resolver_carton_gratis(bigint,text)
+to authenticated;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'solicitudes_carton_gratis'
+  ) then
+    alter publication supabase_realtime
+      add table public.solicitudes_carton_gratis;
+  end if;
+end;
+$$;
+
+-- Meta variable de referidos administrada desde el panel.
+
+alter table public.configuracion
+  drop constraint if exists configuracion_meta_referidos_valida;
+
+alter table public.configuracion
+  add constraint configuracion_meta_referidos_valida
+  check (
+    clave <> 'meta_referidos'
+    or case
+      when valore ~ '^[0-9]{1,3}$'
+        then valore::integer between 1 and 100
+      else false
+    end
+  );
+
+create or replace function public.rpc_admin_configurar_meta_referidos(
+  _meta integer
+)
+returns jsonb
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+begin
+  if not (select private.is_admin()) then
+    raise exception 'Acceso denegado';
+  end if;
+
+  if _meta is null or _meta < 1 or _meta > 100 then
+    raise exception 'La meta debe estar entre 1 y 100';
+  end if;
+
+  insert into public.configuracion (clave, valore, valor)
+  values ('meta_referidos', _meta::text, null)
+  on conflict (clave) do update
+  set valore = excluded.valore,
+      valor = null;
+
+  return jsonb_build_object(
+    'exito', true,
+    'meta', _meta
+  );
+end;
+$$;
+
+create or replace function public.rpc_admin_resolver_carton_gratis(
+  _id bigint,
+  _estado text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v public.solicitudes_carton_gratis%rowtype;
+  v_carton public.cartones%rowtype;
+  v_insertados integer := 0;
+  v_restantes integer := 0;
+  v_meta_actual integer := 5;
+begin
+  if not (select private.is_admin()) then
+    raise exception 'Acceso denegado';
+  end if;
+  if _estado not in ('aprobado', 'rechazado') then
+    raise exception 'Estado inválido';
+  end if;
+
+  select least(100, greatest(1, coalesce(nullif(c.valore, '')::integer, 5)))
+  into v_meta_actual
+  from public.configuracion c
+  where c.clave = 'meta_referidos';
+  v_meta_actual := coalesce(v_meta_actual, 5);
+
+  select s.* into v
+  from public.solicitudes_carton_gratis s
+  where s.id = _id
+  for update;
+  if not found then
+    raise exception 'Solicitud no encontrada';
+  end if;
+
+  if v.estado = _estado then
+    if v.estado = 'aprobado' then
+      select count(*)::integer
+      into v_restantes
+      from private.referidos_aprobados_canonicos(v.cedula) a
+      where not exists (
+        select 1
+        from public.referidos_canjeados r
+        where r.referidor_cedula = v.cedula
+          and r.referido_cedula = a.referido_cedula
+      );
+    end if;
+
+    return jsonb_build_object(
+      'exito', true,
+      'sin_cambios', true,
+      'estado', v.estado,
+      'carton', v.carton,
+      'referidos_consumidos',
+        case when v.estado = 'aprobado' then v.meta_referidos else 0 end,
+      'referidos_restantes', v_restantes,
+      'meta_actual', v_meta_actual
+    );
+  end if;
+  if v.estado <> 'pendiente' then
+    raise exception 'La solicitud ya fue revisada';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('premio-referidos:' || v.cedula, 0)
+  );
+
+  select c.* into v_carton
+  from public.cartones c
+  where c.numero = v.carton
+  for update;
+
+  if not found
+     or v_carton.cedula <> v.cedula
+     or v_carton.premio_solicitud_id is distinct from v.id then
+    raise exception 'El cartón reservado para esta solicitud ya no está disponible';
+  end if;
+
+  if _estado = 'rechazado' then
+    update public.solicitudes_carton_gratis
+    set estado = 'rechazado',
+        revisado_at = now(),
+        revisado_por = (select auth.uid())
+    where id = v.id;
+
+    delete from public.cartones c
+    where c.numero = v.carton
+      and c.cedula = v.cedula
+      and c.premio_solicitud_id = v.id;
+
+    return jsonb_build_object(
+      'exito', true,
+      'estado', 'rechazado',
+      'carton', v.carton,
+      'referidos_consumidos', 0,
+      'meta_actual', v_meta_actual
+    );
+  end if;
+
+  with elegibles as (
+    select a.referido_cedula
+    from private.referidos_aprobados_canonicos(v.cedula) a
+    where not exists (
+      select 1
+      from public.referidos_canjeados r
+      where r.referidor_cedula = v.cedula
+        and r.referido_cedula = a.referido_cedula
+    )
+    order by a.aprobado_at, a.referido_cedula
+    limit v.meta_referidos
+  ), insertados as (
+    insert into public.referidos_canjeados (
+      solicitud_id, referidor_cedula, referido_cedula
+    )
+    select v.id, v.cedula, e.referido_cedula
+    from elegibles e
+    on conflict do nothing
+    returning 1
+  )
+  select count(*)::integer into v_insertados from insertados;
+
+  if v_insertados <> v.meta_referidos then
+    raise exception 'La solicitud ya no tiene % referidos aprobados disponibles',
+      v.meta_referidos;
+  end if;
+
+  update public.solicitudes_carton_gratis
+  set estado = 'aprobado',
+      revisado_at = now(),
+      revisado_por = (select auth.uid())
+  where id = v.id;
+
+  update public.cartones c
+  set ocupado = true,
+      reservado_hasta = null,
+      reserva_token_hash = null
+  where c.numero = v.carton
+    and c.premio_solicitud_id = v.id;
+
+  select count(*)::integer
+  into v_restantes
+  from private.referidos_aprobados_canonicos(v.cedula) a
+  where not exists (
+    select 1
+    from public.referidos_canjeados r
+    where r.referidor_cedula = v.cedula
+      and r.referido_cedula = a.referido_cedula
+  );
+
+  return jsonb_build_object(
+    'exito', true,
+    'estado', 'aprobado',
+    'carton', v.carton,
+    'referidos_consumidos', v.meta_referidos,
+    'referidos_restantes', v_restantes,
+    'meta_actual', v_meta_actual
+  );
+end;
+$$;
+
+revoke all on function public.rpc_admin_configurar_meta_referidos(integer)
+  from public, anon, authenticated;
+grant execute on function public.rpc_admin_configurar_meta_referidos(integer)
+  to authenticated;
+
+revoke all on function public.rpc_admin_resolver_carton_gratis(bigint,text)
+  from public, anon, authenticated;
+grant execute on function public.rpc_admin_resolver_carton_gratis(bigint,text)
+  to authenticated;
+
+
+notify pgrst, 'reload schema';
