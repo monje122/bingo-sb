@@ -51,7 +51,7 @@ body::before {
   left: 0;
   width: 100%;
   height: 100%;
-  background-image: url('https://jfqssrxzxaxlszbddmel.supabase.co/storage/v1/object/public/imagenes/Gemini_Generated_Image_tnmhuatnmhuatnmh.jfif');
+  background-image: url('');
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
@@ -80,7 +80,7 @@ section:not(.oculto) {
 .logo {
   display: block;
   margin: 30px auto 30px;
-  width: 150px;
+  width: 250px;
   height: auto;
   aspect-ratio: 1240 / 568;
   object-fit: contain;
