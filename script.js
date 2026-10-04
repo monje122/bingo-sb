@@ -3601,7 +3601,7 @@ cartonesOcupados = await fetchTodosLosOcupados();
     const urlComprobante = urlsComprobantes.get(rutaComprobante) || '';
     const enlaceWhatsapp = buildWhatsAppLink(
       item.telefono,
-      `Hola ${item.nombre}, te escribo de parte del equipo de bingoandino75.`
+      `Hola ${item.nombre}, te escribo de parte del equipo de bingo s&b.`
     );
     tr.dataset.estadoActual = item.estado || 'pendiente';
     tr.innerHTML = `
