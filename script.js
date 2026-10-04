@@ -3116,7 +3116,7 @@ async function copiarEnlaceReferido() {
 }
 
 function obtenerMensajeCompartirReferido() {
-  return '🎁 ¡Juega conmigo en Bingo Ganga! Regístrate con mi enlace de invitación:';
+  return '🎁 ¡Juega conmigo en Bingo SB! Regístrate con mi enlace de invitación:';
 }
 
 async function compartirEnlaceReferido() {
@@ -3130,7 +3130,7 @@ async function compartirEnlaceReferido() {
   }
 
   const datos = {
-    title: 'Bingo Ganga',
+    title: 'Bingo SB',
     text: obtenerMensajeCompartirReferido(),
     url: enlace
   };
