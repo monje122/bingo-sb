@@ -2325,7 +2325,7 @@ async function prepararComprobanteSeguro(archivoOriginal, actualizarEstado) {
 }
 
 function nombreCartonWebP(numero) {
-  return `SERIAL_BINGOGANGA_CARTON_${String(numero).padStart(5, '0')}.webp`;
+  return `SERIAL_BINGOSB_CARTON_${String(numero).padStart(5, '0')}.webp`;
 }
 
 function urlCartonWebP(numero) {
