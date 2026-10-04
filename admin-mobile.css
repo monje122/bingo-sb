@@ -1,0 +1,118 @@
+@media (max-width: 700px) {
+  #tab-ventas > .panel-section:first-child {
+    overflow: hidden !important;
+  }
+
+  #tab-ventas > .panel-section:first-child .table-wrapper {
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    padding: 8px !important;
+    border: 1px solid #e0e0e0 !important;
+    background: #ffffff !important;
+    border-radius: 12px !important;
+  }
+
+  #admin-panel #tabla-comprobantes {
+    display: table !important;
+    width: max-content !important;
+    min-width: 1040px !important;
+    table-layout: auto !important;
+    border-collapse: collapse !important;
+    background: #ffffff !important;
+  }
+
+  #admin-panel #tabla-comprobantes thead {
+    display: table-header-group !important;
+  }
+
+  #admin-panel #tabla-comprobantes tbody {
+    display: table-row-group !important;
+  }
+
+  #admin-panel #tabla-comprobantes tr {
+    display: table-row !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  #admin-panel #tabla-comprobantes th,
+  #admin-panel #tabla-comprobantes td {
+    display: table-cell !important;
+    width: auto !important;
+    min-height: 0 !important;
+    padding: 10px 8px !important;
+    border-bottom: 1px solid #e8e8e8 !important;
+    color: #2c3e50 !important;
+    text-align: center !important;
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: anywhere !important;
+    vertical-align: middle !important;
+  }
+
+  #admin-panel #tabla-comprobantes th {
+    background: linear-gradient(135deg, #ffff00, #f9e65c) !important;
+    color: #1a1a2e !important;
+    font-size: 11px !important;
+    font-weight: 800 !important;
+    text-transform: uppercase !important;
+    white-space: nowrap !important;
+  }
+
+  #admin-panel #tabla-comprobantes td::before {
+    content: none !important;
+  }
+
+  #admin-panel #tabla-comprobantes th:nth-child(1),
+  #admin-panel #tabla-comprobantes td:nth-child(1) { min-width: 140px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(2),
+  #admin-panel #tabla-comprobantes td:nth-child(2) { min-width: 120px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(3),
+  #admin-panel #tabla-comprobantes td:nth-child(3) { min-width: 110px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(4),
+  #admin-panel #tabla-comprobantes td:nth-child(4) { min-width: 110px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(5),
+  #admin-panel #tabla-comprobantes td:nth-child(5) { min-width: 120px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(6),
+  #admin-panel #tabla-comprobantes td:nth-child(6) { min-width: 110px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(7),
+  #admin-panel #tabla-comprobantes td:nth-child(7) { min-width: 100px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(8),
+  #admin-panel #tabla-comprobantes td:nth-child(8) { min-width: 170px !important; }
+  #admin-panel #tabla-comprobantes th:nth-child(9),
+  #admin-panel #tabla-comprobantes td:nth-child(9) { min-width: 120px !important; }
+
+  #admin-panel #tabla-comprobantes img {
+    width: 58px !important;
+    height: 58px !important;
+    margin: 0 auto !important;
+  }
+
+  #admin-panel #tabla-comprobantes .btn-accion {
+    display: inline-flex !important;
+    width: 34px !important;
+    height: 34px !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin: 2px !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    font-size: 18px !important;
+  }
+
+  #admin-panel #tabla-comprobantes .btn-copiar-pago {
+    width: auto !important;
+    min-width: 94px !important;
+    max-width: none !important;
+    margin: 8px auto 0 !important;
+    padding: 8px 10px !important;
+    background: #ffff00 !important;
+    color: #020a35 !important;
+    font-size: 12px !important;
+  }
+}
