@@ -815,6 +815,7 @@ button:disabled {
 .admin-header h2 {
   margin: 0;
   color: #2c3e50;
+  color: rgba(255, 255, 255, 0.85);
   font-size: 28px;
 }
 
@@ -827,6 +828,7 @@ button:disabled {
   border-radius: 50px;
   font-size: 14px;
   color: #555;
+  
 }
 
 .admin-tabs {
@@ -843,6 +845,7 @@ button:disabled {
   border: none;
   background: transparent;
   color: #666;
+  color: rgba(255, 255, 255, 0.85);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
@@ -953,6 +956,7 @@ button:disabled {
   margin-bottom: 25px;
   box-shadow: 0 1px 6px rgba(0,0,0,0.06);
   border: 1px solid #eee;
+  color: var(--dark);
 }
 
 .section-header {
